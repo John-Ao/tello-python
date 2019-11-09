@@ -18,6 +18,7 @@ import cv2
 import tello_base as tello
 import matplotlib.pyplot as plt
 import matplotlib
+import numpy as np
 
 def mypause(interval):
 	backend = plt.rcParams['backend']
@@ -29,6 +30,45 @@ def mypause(interval):
 				canvas.draw()
 			canvas.start_event_loop(interval)
 			return
+
+def find_red(frame):
+	# range of red color
+	lower_red = np.array([110,190,70])
+	upper_red = np.array([130,255,255])
+
+	hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+	imgThreshHigh = cv2.inRange(hsv, lower_red, upper_red)
+	thresh = imgThreshHigh.copy()
+
+	_,contours,_ = cv2.findContours(thresh, cv2.RETR_LIST,cv2.CHAIN_APPROX_SIMPLE)
+	max_area=500
+	found=False
+	h,w=frame.shape[:2]
+	for cnt in contours:
+		area = cv2.contourArea(cnt)
+		if area > max_area:# and area>0.5*barea:
+			# A = cv2.contourArea(cv2.minAreaRect(cnt))
+			# if area>0.5*barea:
+			rotatedRect = cv2.minAreaRect(cnt)
+			box = cv2.boxPoints(rotatedRect)
+			box = np.int0(box)
+			x1,x2,y1,y2=max(np.min(box[:,0]),0),min(np.max(box[:,0]),w),max(0,np.min(box[:,1])),min(h,np.max(box[:,1]))
+			A=abs(x1-x2)*abs(y1-y2)
+			w1,w2=abs(x1-x2),abs(y1-y2)
+			if area>0.5*A:# and w2<1.5*w1 and w1<1.5*w2:
+				max_area = area
+				best_cnt = cnt
+				found=True
+	if not found:
+		return False
+	else:
+		# print(max_area)
+		rotatedRect = cv2.minAreaRect(best_cnt)
+		box = cv2.boxPoints(rotatedRect)
+		box = np.int0(box)
+		x1,x2,y1,y2=max(np.min(box[:,0]),0),min(np.max(box[:,0]),w),max(0,np.min(box[:,1])),min(h,np.max(box[:,1]))
+		# img=frame[y1:y2,x1:x2]
+		return (x1,x2,y1,y2)#((x1+x2)//2,(y1+y2)//2)
 
 def callback(data, drone):
 	command=data.data
@@ -63,10 +103,16 @@ def state_updater():
 		pass
 
 def get_state():
+	global drone,STOP
 	global state_dict,state_lock
 	state_lock.acquire(True)
 	s=state_dict.copy()
 	state_lock.release()
+	if s['mid']==-1 and not STOP:
+		print('Lose mid, going up...')
+		drone.send_command('up 50')
+		time.sleep(2)
+		return get_state()
 	return s
 
 def image_updater():
@@ -81,9 +127,23 @@ def image_updater():
 			if frame is None or frame.size == 0:
 				continue
 			if show_plt:
-				plt.imshow(frame)
-				plt.title(tello_state)
-				mypause(0.1)
+				# try:
+				rx=ry=0
+				img = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+				red_dot=find_red(img)
+				if red_dot:
+					# print('find!')
+					x1,x2,y1,y2=red_dot
+					frame[y1:y2,x1:x2,:]=255
+				# except Exception as e:
+				# 	print(e)
+				# print('image:%f'%time.time())
+				cv2.imshow('image',frame)
+				cv2.waitKey(20)
+				# plt.imshow(frame[:,:,[2,1,0]])
+				# plt.title('%d,%d'%(rx,ry))#tello_state)
+				# time.sleep(0.02)
+				# mypause(0.1)
 
 	except rospy.ROSInterruptException:
 		pass
@@ -125,46 +185,110 @@ def parse_state(statestr):
 def control():
 	global state_ready,STOP
 	ex=drone.send_command
+	ex('speed 10')
 	if state_ready:
 		# take off and find mid
 		ex('takeoff')
 		ex('up 50')
 		retry=5
 		while retry>0:
+			if STOP: return
 			print('trying to find mid-1 ... %d'%retry)
 			sdict=get_state()
-			if sdict['mid']==1:
+			if sdict['mid']!=-1:
 				break
 			retry-=1
 			time.sleep(1)
-		if sdict['mid']!=1:
+		if sdict['mid']==-1:
 			print('Failed, quit.')
 			return
-
-		# adjust roll angle
-		eps=10
-		last_roll=0
-		while True:
-			s=get_state()
-			roll=s['mpry'][1]
-			if abs(roll-last_roll)<3:
-				if abs(roll)>eps:
-					if roll>0:
-						ex('ccw %d'%roll)
+		while not STOP:
+			# adjust roll angle
+			eps=3
+			last_roll=0
+			target_roll=0 # if you change this, you'll have to modify a/w/s/d
+			while True:
+				if STOP: return
+				s=get_state()
+				roll=s['mpry'][1]
+				if abs(roll-last_roll)<3:
+					if abs(roll-target_roll)>eps:
+						if roll>target_roll:
+							ex('ccw %d'%(roll-target_roll))
+						else:
+							ex('cw %d'%(target_roll-roll))
+						time.sleep(1)
 					else:
-						ex('cw %d'%-roll)
-					time.sleep(1)
+						break
 				else:
-					break
-			else:
-				print('not steady... %d'%roll)
-			last_roll=roll
-			time.sleep(1)
-		print('Adjust done, roll: %d'%roll)
+					print('roll not steady... %d'%roll)
+				last_roll=roll
+				time.sleep(1)
+			print('Adjust roll done, roll: %d'%roll)
 
-		# adjust x
+			# adjust x
+			eps=10
+			last_x=0
+			target_x=100
+			while True:
+				if STOP: return
+				s=get_state()
+				x=s['x']
+				if abs(x-last_x)<10:
+					if abs(x-target_x)>eps:
+						if abs(x-target_x)<20:
+							print('Too close x: %d'%x)
+							break
+							# if x>target_x:
+							# 	ex('forward 20')
+							# else:
+							# 	ex('back 20')
+						else:
+							print('Flying to position from x:%d'%x)
+							if x>target_x:
+								ex('back %d'%(x-target_x))
+							else:
+								ex('forward %d'%(target_x-x))
+						time.sleep(1)
+					else:
+						break
+				else:
+					print('x not steady... %d'%x)
+				last_x=x
+				time.sleep(0.2)
+			print('Adjust x done, x: %d'%x)
 
-
+			# adjust y
+			eps=10
+			last_y=0
+			target_y=100
+			while True:
+				if STOP: return
+				s=get_state()
+				y=s['y']
+				if abs(y-last_y)<10:
+					if abs(y-target_y)>eps:
+						if abs(y-target_y)<20:
+							print('Too close y: %d'%y)
+							break
+							# if y>target_y:
+							# 	ex('left 20')
+							# else:
+							# 	ex('right 20')
+						else:
+							print('Flying to position from y:%d'%y)
+							if y>target_y:
+								ex('left %d'%(y-target_y))
+							else:
+								ex('right %d'%(target_y-y))
+						time.sleep(1)
+					else:
+						break
+				else:
+					print('y not steady... %d'%y)
+				last_y=y
+				time.sleep(0.2)
+			print('Adjust y done, y: %d'%y)
 	else:
 		print('state is NOT ready yet, try again later.')
 	# you can send command to tello without ROS, for example:(if you use this function, make sure commit "pass" above!!!)
@@ -206,7 +330,7 @@ if __name__ == '__main__':
 
 	try:
 		while not (rospy.is_shutdown() or STOP):
-			drone.send_command('Command')
+			drone.send_command('command')
 			cmd=input()
 			cmd1={'a':'left 20',
 				  'w':'forward 20',
@@ -218,7 +342,9 @@ if __name__ == '__main__':
 				  'l':'cw 10',
 				  'u':'takeoff',
 				  'o':'land',
-				  'e':'emergency'}
+				  'e':'emergency',
+				  'b':'battery?',
+				  'p':'stop'}
 			if cmd=='x':
 				print('Exiting...')
 				STOP=True
@@ -228,7 +354,7 @@ if __name__ == '__main__':
 			elif cmd=='echo':
 				print_state=not print_state
 			elif cmd in cmd1:
-				drone.send_command(cmd1[cmd])
+				threading.Thread(target=(lambda x:print(drone.send_command(x))),args=(cmd1[cmd],)).start()
 			# img = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 			# try:
 			# 	img_msg = CvBridge().cv2_to_imgmsg(img, 'bgr8')
