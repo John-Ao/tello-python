@@ -117,7 +117,9 @@ def get_state():
 
 def image_updater():
 	print('Image updater started')
-	global frame,drone,STOP,tello_state
+	global frame,drone,STOP,tello_state,dot_pos,dot_lock
+	found_dot=False
+	dot_lock.acquire(True)
 	show_plt=True
 	if show_plt:
 		plt.ion()
@@ -128,13 +130,21 @@ def image_updater():
 				continue
 			if show_plt:
 				# try:
-				rx=ry=0
 				img = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 				red_dot=find_red(img)
 				if red_dot:
 					# print('find!')
+					if not found_dot:
+						dot_lock.release()
+					found_dot=True
 					x1,x2,y1,y2=red_dot
 					frame[y1:y2,x1:x2,:]=255
+					h,w=frame.shape[:2]
+					dot_pos=((x1+x2)/w/2,(y1+y2)/h/2)
+				else:
+					if found_dot:
+						dot_lock.acquire()
+					found_dot=False
 				# except Exception as e:
 				# 	print(e)
 				# print('image:%f'%time.time())
@@ -182,8 +192,24 @@ def parse_state(statestr):
 			state['yaw'] = yaw
 	return state
 
+def check_z():
+	min_z=120
+	max_z=180
+	global drone,STOP
+	if not STOP:
+		s=get_state()
+		z=abs(s['z'])
+		if z<min_z:
+			drone.send_command('up 30')
+			time.sleep(1)
+		elif z>max_z:
+			drone.send_command('down 20')
+			time.sleep(1)
+
+	
+
 def control():
-	global state_ready,STOP
+	global drone,state_ready,STOP,dot_pos,dot_lock
 	ex=drone.send_command
 	ex('speed 10')
 	if state_ready:
@@ -202,13 +228,17 @@ def control():
 		if sdict['mid']==-1:
 			print('Failed, quit.')
 			return
-		while not STOP:
+		Adjusted=True
+		while not STOP and Adjusted:
+			Adjusted=False
+			check_z()
 			# adjust roll angle
 			eps=3
 			last_roll=0
 			target_roll=0 # if you change this, you'll have to modify a/w/s/d
 			while True:
 				if STOP: return
+				print('adjust roll')
 				s=get_state()
 				roll=s['mpry'][1]
 				if abs(roll-last_roll)<3:
@@ -217,7 +247,8 @@ def control():
 							ex('ccw %d'%(roll-target_roll))
 						else:
 							ex('cw %d'%(target_roll-roll))
-						time.sleep(1)
+						Adjusted=True
+						check_z()#time.sleep(1)
 					else:
 						break
 				else:
@@ -225,70 +256,134 @@ def control():
 				last_roll=roll
 				time.sleep(1)
 			print('Adjust roll done, roll: %d'%roll)
+			Jump=False
+			retry=10
+			while retry>0:
+				retry-=1
+				if dot_lock.acquire(False): # if you can acquire it ,means it's not ready
+					dot_lock.release()
+					Adjusted=True
+					time.sleep(0.02)
+				else:
+					pos=dot_pos
+					Jump=True
+					print('JUMP!')
+					break
+			if not Jump:
+				# adjust x
+				eps=10
+				last_x=0
+				target_x=70
+				while True:
+					if STOP: return
+					print('adjust x')
+					s=get_state()
+					x=s['x']
+					if abs(x-last_x)<10:
+						if abs(x-target_x)>eps:
+							if abs(x-target_x)<20:
+								print('Too close x: %d'%x)
+								break
+								# if x>target_x:
+								# 	ex('forward 20')
+								# else:
+								# 	ex('back 20')
+							else:
+								print('Flying to position from x:%d'%x)
+								if x>target_x:
+									ex('back %d'%(x-target_x))
+								else:
+									ex('forward %d'%(target_x-x))
+							check_z()#time.sleep(1)
+							Adjusted=True
+						else:
+							break
+					else:
+						print('x not steady... %d'%x)
+					last_x=x
+					time.sleep(0.2)
+				print('Adjust x done, x: %d'%x)
 
-			# adjust x
-			eps=10
-			last_x=0
-			target_x=100
-			while True:
-				if STOP: return
+				# adjust y
+				eps=10
+				last_y=0
+				target_y=100
+				while True:
+					if STOP: return
+					print('adjust y')
+					s=get_state()
+					y=s['y']
+					if abs(y-last_y)<10:
+						if abs(y-target_y)>eps:
+							if abs(y-target_y)<20:
+								print('Too close y: %d'%y)
+								break
+								# if y>target_y:
+								# 	ex('left 20')
+								# else:
+								# 	ex('right 20')
+							else:
+								print('Flying to position from y:%d'%y)
+								if y>target_y:
+									ex('left %d'%(y-target_y))
+								else:
+									ex('right %d'%(target_y-y))
+							check_z()#time.sleep(1)
+							Adjusted=True
+						else:
+							break
+					else:
+						print('y not steady... %d'%y)
+					last_y=y
+					time.sleep(0.2)
+				print('Adjust y done, y: %d'%y)
+				if dot_lock.acquire(False): # if you can acquire it ,means it's not ready
+					dot_lock.release()
+					Adjusted=True
+				else:
+					pos=dot_pos
+		while True:
+			yy,zz=dot_pos
+			print('adjust dot')
+			if STOP: return
+			ad=False
+			s=get_state()
+			x=s['x']
+			if x>120:
+				min_z=0.4
+				max_z=0.9
+				max_y=0.8
+				min_y=0.3
+			else:
+				min_z=0.5
+				max_z=0.8
+				max_y=0.6
+				min_y=0.4
+			if zz>max_z:
+				ex('down 20')
+				ad=True
+			elif zz<min_z:
+				ex('up 20')
+				ad=True
+			if yy>max_y:
+				ex('right 20')
+				ad=True
+			elif yy<min_y:
+				ex('left 20')
+				ad=True
+			if ad:
+				time.sleep(1)
+			else:
 				s=get_state()
 				x=s['x']
-				if abs(x-last_x)<10:
-					if abs(x-target_x)>eps:
-						if abs(x-target_x)<20:
-							print('Too close x: %d'%x)
-							break
-							# if x>target_x:
-							# 	ex('forward 20')
-							# else:
-							# 	ex('back 20')
-						else:
-							print('Flying to position from x:%d'%x)
-							if x>target_x:
-								ex('back %d'%(x-target_x))
-							else:
-								ex('forward %d'%(target_x-x))
-						time.sleep(1)
-					else:
-						break
+				if x<120:
+					ex('forward 30')
 				else:
-					print('x not steady... %d'%x)
-				last_x=x
-				time.sleep(0.2)
-			print('Adjust x done, x: %d'%x)
+					ex('forward 150')
+					break
+			time.sleep(0.5)
+		print('Done!')
 
-			# adjust y
-			eps=10
-			last_y=0
-			target_y=100
-			while True:
-				if STOP: return
-				s=get_state()
-				y=s['y']
-				if abs(y-last_y)<10:
-					if abs(y-target_y)>eps:
-						if abs(y-target_y)<20:
-							print('Too close y: %d'%y)
-							break
-							# if y>target_y:
-							# 	ex('left 20')
-							# else:
-							# 	ex('right 20')
-						else:
-							print('Flying to position from y:%d'%y)
-							if y>target_y:
-								ex('left %d'%(y-target_y))
-							else:
-								ex('right %d'%(target_y-y))
-						time.sleep(1)
-					else:
-						break
-				else:
-					print('y not steady... %d'%y)
-				last_y=y
-				time.sleep(0.2)
-			print('Adjust y done, y: %d'%y)
 	else:
 		print('state is NOT ready yet, try again later.')
 	# you can send command to tello without ROS, for example:(if you use this function, make sure commit "pass" above!!!)
@@ -300,9 +395,10 @@ def control():
 
 if __name__ == '__main__':
 	global drone,frame,state_pub,img_pub,tello_state,STOP, \
-			state_lock,state_ready,print_state
+			state_lock,state_ready,print_state,dot_lock
 
 	state_lock = threading.Lock()
+	dot_lock = threading.Lock()
 	STOP=False
 	state_ready=False
 	print_state=False
@@ -344,7 +440,10 @@ if __name__ == '__main__':
 				  'o':'land',
 				  'e':'emergency',
 				  'b':'battery?',
-				  'p':'stop'}
+				  'p':'stop',
+				  'z':'rc 10 0 0 0',
+				  'x':'rc -10 0 0 0',
+				  'c':'rc 0 0 0 0'}
 			if cmd=='x':
 				print('Exiting...')
 				STOP=True
