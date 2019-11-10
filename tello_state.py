@@ -119,7 +119,8 @@ def get_state():
 def image_updater():
 	print('Image updater started')
 	# frame is actually not global
-	global frame,drone,STOP,tello_state,dot_pos,dot_lock,detector
+	global frame,drone,STOP,tello_state,dot_pos,dot_lock,detector, \
+			detect_mode,det
 	found_dot=False
 	dot_lock.acquire(True)
 	show_plt=True
@@ -133,31 +134,35 @@ def image_updater():
 			if show_plt:
 				# try:
 				img = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-				red_dot=find_red(img)
-				if red_dot:
-					# print('find!')
-					if not found_dot:
-						dot_lock.release()
-					found_dot=True
-					x1,x2,y1,y2=red_dot
-					frame[y1:y2,x1:x2,:]=255
-					h,w=frame.shape[:2]
-					dot_pos=((x1+x2)/w/2,(y1+y2)/h/2)
-				else:
-					if found_dot:
-						dot_lock.acquire()
-					found_dot=False
-				# except Exception as e:
-				# 	print(e)
-				# print('image:%f'%time.time())
 
-				det=detector.detect_ball(img)
-				if det is not None:
-					bimg=detector.drawbox(img,det)
-					cv2.imshow('image',bimg)
-				else:
-					cv2.imshow('image',img)
-				cv2.waitKey(20)
+				if detect_mode==1:
+					red_dot=find_red(img)
+					if red_dot:
+						# print('find!')
+						if not found_dot:
+							dot_lock.release()
+						found_dot=True
+						x1,x2,y1,y2=red_dot
+						frame[y1:y2,x1:x2,:]=255
+						h,w=frame.shape[:2]
+						dot_pos=((x1+x2)/w/2,(y1+y2)/h/2)
+					else:
+						if found_dot:
+							dot_lock.acquire()
+						found_dot=False
+					cv2.imshow('image',frame)
+					cv2.waitKey(20)
+					# except Exception as e:
+					# 	print(e)
+					# print('image:%f'%time.time())
+				elif detect_mode==2:
+					det=detector.detect_ball(img)
+					if det is not None:
+						bimg=detector.drawbox(img,det)
+						cv2.imshow('image',bimg)
+					else:
+						cv2.imshow('image',img)
+					cv2.waitKey(20)
 				# plt.imshow(frame[:,:,[2,1,0]])
 				# plt.title('%d,%d'%(rx,ry))#tello_state)
 				# time.sleep(0.02)
@@ -200,9 +205,7 @@ def parse_state(statestr):
 			state['yaw'] = yaw
 	return state
 
-def check_z():
-	min_z=120
-	max_z=180
+def check_z(min_z=120,max_z=180):
 	global drone,STOP
 	if not STOP:
 		s=get_state()
@@ -215,11 +218,30 @@ def check_z():
 			time.sleep(1)
 
 	
+def mleft(ex):
+	ex('rc -50 0 0 0')
+	time.sleep(0.01)
+	ex('rc 0 0 0 0')
+
+def mright(ex):
+	ex('rc 50 0 0 0')
+	time.sleep(0.01)
+	ex('rc 0 0 0 0')
+def mup(ex):
+	ex('rc 0 0 50 0')
+	time.sleep(0.01)
+	ex('rc 0 0 0 0')
+def mdown(ex):
+	ex('rc 0 0 -50 0')
+	time.sleep(0.01)
+	ex('rc 0 0 0 0')
 
 def control():
-	global drone,state_ready,STOP,dot_pos,dot_lock
+	global drone,state_ready,STOP,dot_pos,dot_lock,detect_mode, \
+			det, target_ball
 	ex=drone.send_command
-	ex('speed 10')
+	ex('speed 50')
+	steady_eps=10
 	if state_ready:
 		# take off and find mid
 		ex('takeoff')
@@ -236,48 +258,54 @@ def control():
 		if sdict['mid']==-1:
 			print('Failed, quit.')
 			return
-		Adjusted=True
-		while not STOP and Adjusted:
-			Adjusted=False
-			check_z()
-			# adjust roll angle
-			eps=3
-			last_roll=0
-			target_roll=0 # if you change this, you'll have to modify a/w/s/d
-			while True:
-				if STOP: return
-				print('adjust roll')
-				s=get_state()
-				roll=s['mpry'][1]
-				if abs(roll-last_roll)<3:
-					if abs(roll-target_roll)>eps:
-						if roll>target_roll:
-							ex('ccw %d'%(roll-target_roll))
+
+		ex('speed 10')
+		if True:
+
+			Adjusted=True
+			while not STOP and Adjusted:
+				Adjusted=False
+				check_z()
+				# adjust roll angle
+				eps=3
+				last_roll=0
+				target_roll=0 # if you change this, you'll have to modify a/w/s/d
+				while True:
+					if STOP: return
+					print('adjust roll')
+					s=get_state()
+					roll=s['mpry'][1]
+					if abs(roll-last_roll)<3:
+						if abs(roll-target_roll)>eps:
+							if roll>target_roll:
+								ex('ccw %d'%(roll-target_roll))
+							else:
+								ex('cw %d'%(target_roll-roll))
+							Adjusted=True
+							check_z()#time.sleep(1)
 						else:
-							ex('cw %d'%(target_roll-roll))
-						Adjusted=True
-						check_z()#time.sleep(1)
+							break
 					else:
+						print('roll not steady... %d'%roll)
+					last_roll=roll
+					time.sleep(1)
+				print('Adjust roll done, roll: %d'%roll)
+
+				retry=10
+				Jump=False
+				while retry>0:
+					retry-=1
+					if dot_lock.acquire(False): # if you can acquire it ,means it's not ready
+						dot_lock.release()
+						Adjusted=True
+						time.sleep(0.02)
+					else:
+						pos=dot_pos
+						print('JUMP!')
+						Jump=True
 						break
-				else:
-					print('roll not steady... %d'%roll)
-				last_roll=roll
-				time.sleep(1)
-			print('Adjust roll done, roll: %d'%roll)
-			Jump=False
-			retry=10
-			while retry>0:
-				retry-=1
-				if dot_lock.acquire(False): # if you can acquire it ,means it's not ready
-					dot_lock.release()
-					Adjusted=True
-					time.sleep(0.02)
-				else:
-					pos=dot_pos
-					Jump=True
-					print('JUMP!')
-					break
-			if not Jump:
+				if Jump: break
+
 				# adjust x
 				eps=10
 				last_x=0
@@ -287,7 +315,7 @@ def control():
 					print('adjust x')
 					s=get_state()
 					x=s['x']
-					if abs(x-last_x)<10:
+					if abs(x-last_x)<steady_eps:
 						if abs(x-target_x)>eps:
 							if abs(x-target_x)<20:
 								print('Too close x: %d'%x)
@@ -312,6 +340,21 @@ def control():
 					time.sleep(0.2)
 				print('Adjust x done, x: %d'%x)
 
+				retry=10
+				Jump=False
+				while retry>0:
+					retry-=1
+					if dot_lock.acquire(False): # if you can acquire it ,means it's not ready
+						dot_lock.release()
+						Adjusted=True
+						time.sleep(0.02)
+					else:
+						pos=dot_pos
+						print('JUMP!')
+						Jump=True
+						break
+				if Jump: break
+
 				# adjust y
 				eps=10
 				last_y=0
@@ -321,7 +364,7 @@ def control():
 					print('adjust y')
 					s=get_state()
 					y=s['y']
-					if abs(y-last_y)<10:
+					if abs(y-last_y)<steady_eps:
 						if abs(y-target_y)>eps:
 							if abs(y-target_y)<20:
 								print('Too close y: %d'%y)
@@ -345,55 +388,215 @@ def control():
 					last_y=y
 					time.sleep(0.2)
 				print('Adjust y done, y: %d'%y)
-				if dot_lock.acquire(False): # if you can acquire it ,means it's not ready
-					dot_lock.release()
-					Adjusted=True
-				else:
-					pos=dot_pos
-		while True:
-			yy,zz=dot_pos
-			print('adjust dot')
-			if STOP: return
-			ad=False
-			s=get_state()
-			x=s['x']
-			if x>120:
-				min_z=0.4
-				max_z=0.9
-				max_y=0.8
-				min_y=0.3
-			else:
-				min_z=0.5
-				max_z=0.8
-				max_y=0.6
-				min_y=0.4
-			if zz>max_z:
-				ex('down 20')
-				ad=True
-			elif zz<min_z:
-				ex('up 20')
-				ad=True
-			if yy>max_y:
-				ex('right 20')
-				ad=True
-			elif yy<min_y:
-				ex('left 20')
-				ad=True
-			if ad:
-				time.sleep(1)
-			else:
+				# if dot_lock.acquire(False): # if you can acquire it ,means it's not ready
+				# 	dot_lock.release()
+				# 	Adjusted=True
+				# else:
+				# 	pos=dot_pos
+				retry=10
+				Jump=False
+				while retry>0:
+					retry-=1
+					if dot_lock.acquire(False): # if you can acquire it ,means it's not ready
+						dot_lock.release()
+						Adjusted=True
+						time.sleep(0.02)
+					else:
+						pos=dot_pos
+						print('JUMP!')
+						Jump=True
+						break
+				if Jump: break
+
+			while True:
+				yy,zz=dot_pos
+				print('adjust dot')
+				if STOP: return
+				ad=False
 				s=get_state()
 				x=s['x']
-				if x<120:
-					ex('forward 30')
+				micro=False#(x>120)
+				if x>120:
+					print('x is very close...')
+					min_z=0.4
+					max_z=0.9
+					max_y=0.7
+					min_y=0.3
 				else:
-					ex('forward 150')
-					break
-			time.sleep(0.5)
-		print('Done!')
+					min_z=0.3
+					max_z=0.8
+					max_y=0.7
+					min_y=0.3
+				if zz>max_z:
+					if micro:
+						mdown(ex)
+					else:
+						ex('down 20')
+					ad=True
+				elif zz<min_z:
+					if micro:
+						mup(ex)
+					else:
+						ex('up 20')
+					ad=True
+				if yy>max_y:
+					if micro:
+						mright(ex)
+					else:
+						ex('right 20')
+					ad=True
+				elif yy<min_y:
+					if micro:
+						mleft(ex)
+					else:
+						ex('left 20')
+					ad=True
+				if ad:
+					time.sleep(1)
+				else:
+					s=get_state()
+					x=s['x']
+					if x<120:
+						ex('forward 30')
+					else:
+						ex('forward 80')
+						break
+				time.sleep(0.5)
+			print('Go through window!')
 
+		# find the ball
+		check_z(min_z=180,max_z=240)
+		eps=3
+		last_roll=0
+		target_roll=0 # if you change this, you'll have to modify a/w/s/d
+		while True:
+			if STOP: return
+			print('adjust roll')
+			s=get_state()
+			roll=s['mpry'][1]
+			if abs(roll-last_roll)<3:
+				if abs(roll-target_roll)>eps:
+					if roll>target_roll:
+						ex('ccw %d'%(roll-target_roll))
+					else:
+						ex('cw %d'%(target_roll-roll))
+					Adjusted=True
+					check_z()#time.sleep(1)
+				else:
+					break
+			else:
+				print('roll not steady... %d'%roll)
+			last_roll=roll
+			time.sleep(1)
+		print('Adjust roll done, roll: %d'%roll)
+
+		detect_mode=2
+
+		eps=10
+		last_x=0
+		target_x=270
+		while True:
+			if STOP: return
+			print('adjust x')
+			s=get_state()
+			x=s['x']
+			if abs(x-last_x)<steady_eps:
+				if abs(x-target_x)>eps:
+					if abs(x-target_x)<20:
+						print('Too close x: %d'%x)
+						break
+						# if x>target_x:
+						# 	ex('forward 20')
+						# else:
+						# 	ex('back 20')
+					else:
+						print('Flying to position from x:%d'%x)
+						if x>target_x:
+							ex('back %d'%(x-target_x))
+						else:
+							ex('forward %d'%(target_x-x))
+					check_z()#time.sleep(1)
+					Adjusted=True
+				else:
+					break
+			else:
+				print('x not steady... %d'%x)
+			last_x=x
+			time.sleep(0.2)
+		print('Adjust x done, x: %d'%x)
+
+		# adjust y
+		eps=10
+		last_y=0
+		target_y=110
+		while True:
+			if STOP: return
+			print('adjust y')
+			s=get_state()
+			y=s['y']
+			if abs(y-last_y)<steady_eps:
+				if abs(y-target_y)>eps:
+					if abs(y-target_y)<20:
+						print('Too close y: %d'%y)
+						break
+						# if y>target_y:
+						# 	ex('left 20')
+						# else:
+						# 	ex('right 20')
+					else:
+						print('Flying to position from y:%d'%y)
+						if y>target_y:
+							ex('left %d'%(y-target_y))
+						else:
+							ex('right %d'%(target_y-y))
+					check_z()#time.sleep(1)
+					Adjusted=True
+				else:
+					break
+			else:
+				print('y not steady... %d'%y)
+			last_y=y
+			time.sleep(0.2)
+		print('Adjust y done, y: %d'%y)
+
+		print('Trying to find balls...')
+		while True:
+			if STOP: return
+			mydet=det
+			print(det)
+			if mydet is not None and len(mydet)==2:
+				mydet.sort(key=lambda x:x[0])
+				balls=[int(x[-1]) for x in mydet]
+				if target_ball in balls:
+					ex('speed 50')
+					if target_ball==balls[0]:
+						print('on the left')
+						time.sleep(1)
+						# ex('flip l')
+						ex('left 20')
+						time.sleep(0.2)
+						ex('up 40')
+						time.sleep(0.2)
+						ex('forward 150')
+						time.sleep(1)
+					else:
+						print('on the right')
+						time.sleep(1)
+						# ex('flip r')
+						ex('right 50')
+						time.sleep(0.2)
+						ex('up 40')
+						time.sleep(0.2)
+						ex('forward 150')
+						time.sleep(1)
+					ex('land')
+			check_z()
+			time.sleep(0.2)
+		print('Done!')
 	else:
 		print('state is NOT ready yet, try again later.')
+
+		
 	# you can send command to tello without ROS, for example:(if you use this function, make sure commit "pass" above!!!)
 	# drone.send_command("takeoff")
 	# drone.send_command("go 0 50 0 10")
@@ -403,13 +606,16 @@ def control():
 
 if __name__ == '__main__':
 	global drone,frame,state_pub,img_pub,tello_state,STOP, \
-			state_lock,state_ready,print_state,dot_lock,detector
-
+			state_lock,state_ready,print_state,dot_lock,detector, \
+			detect_mode,target_ball,det
+	det=None
 	state_lock = threading.Lock()
 	dot_lock = threading.Lock()
 	STOP=False
 	state_ready=False
 	print_state=False
+	detect_mode=1 # 1 for red dot and 2 for balls
+	target_ball=0 #['basketball', 'football', 'volleyball', 'balloon']
 
 	drone = tello.Tello('', 8888)
 	rospy.init_node('tello_state', anonymous=True)
@@ -454,11 +660,13 @@ if __name__ == '__main__':
 				  'e':'emergency',
 				  'b':'battery?',
 				  'p':'stop',
-				  'z':'rc 10 0 0 0',
-				  'x':'rc -10 0 0 0',
-				  'c':'rc 0 0 0 0'}
+				  'f':'rc 50 0 0 0',
+				  'h':'rc -50 0 0 0',
+				  'c':'rc 0 0 0 0',
+				  't':'rc 0 0 50 0 ',
+				  'g':'rc 0 0 -50 0'}
 			if cmd=='x':
-				print('Exiting...')
+				print('Exiting...')#
 				STOP=True
 			elif cmd=='start':
 				control_thread = threading.Thread(target = control)
