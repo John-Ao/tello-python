@@ -19,6 +19,7 @@ import tello_base as tello
 import matplotlib.pyplot as plt
 import matplotlib
 import numpy as np
+from yolo_v3.detect import Detector
 
 def mypause(interval):
 	backend = plt.rcParams['backend']
@@ -117,7 +118,8 @@ def get_state():
 
 def image_updater():
 	print('Image updater started')
-	global frame,drone,STOP,tello_state,dot_pos,dot_lock
+	# frame is actually not global
+	global frame,drone,STOP,tello_state,dot_pos,dot_lock,detector
 	found_dot=False
 	dot_lock.acquire(True)
 	show_plt=True
@@ -148,7 +150,13 @@ def image_updater():
 				# except Exception as e:
 				# 	print(e)
 				# print('image:%f'%time.time())
-				cv2.imshow('image',frame)
+
+				det=detector.detect_ball(img)
+				if det is not None:
+					bimg=detector.drawbox(img,det)
+					cv2.imshow('image',bimg)
+				else:
+					cv2.imshow('image',img)
 				cv2.waitKey(20)
 				# plt.imshow(frame[:,:,[2,1,0]])
 				# plt.title('%d,%d'%(rx,ry))#tello_state)
@@ -395,7 +403,7 @@ def control():
 
 if __name__ == '__main__':
 	global drone,frame,state_pub,img_pub,tello_state,STOP, \
-			state_lock,state_ready,print_state,dot_lock
+			state_lock,state_ready,print_state,dot_lock,detector
 
 	state_lock = threading.Lock()
 	dot_lock = threading.Lock()
@@ -408,6 +416,11 @@ if __name__ == '__main__':
 
 	state_pub = rospy.Publisher('tello_state',String, queue_size=3)
 	img_pub = rospy.Publisher('tello_image', Image, queue_size=5)
+
+	detector=Detector()
+	print('Initializing detector...')
+	detector.load_weight()
+	print('Done!')
 
 	# you can subscribe command directly, or you can just commit this function
 	sub_thread = threading.Thread(target = subscribe)
