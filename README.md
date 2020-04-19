@@ -1,3 +1,5 @@
+> This repo is based on the minimal demo provided by TAs. Following text is the original readme file.
+
 # Tello_Control
 
 这是THU无人机赛课初赛提供的最小控制demo，供同学们参考。
